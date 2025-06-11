@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+import os
+from traceback import print_exc
+import requests
+import json
+
+MODEL_BASE_URL = 'https://api-inference.huggingface.co/models/'
+CONFIG_BASE_NAME = "bashai.json"
+CONFIG_PATHS = [
+    os.path.join(os.path.dirname(__file__), CONFIG_BASE_NAME),
+    os.path.join(os.path.expanduser("~"), CONFIG_BASE_NAME),
+    os.path.join("/etc", CONFIG_BASE_NAME)
+]
+def load_config():
+    for config_path in CONFIG_PATHS:
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                try:
+                    config = json.load(f)
+                    return config
+                except json.JSONDecodeError:
+                    print(f"ERROR: Invalid JSON in {config_path}", file=sys.stderr)
+                    continue
+    print("ERROR: Configuration file not found or invalid", file=sys.stderr)
+    sys.exit(1)
+
+
+def get_bash_command(api_token: str, model: str, model_params: dict, natural_language_request: str) -> str:
+    headers = {"Authorization": f"Bearer {api_token}"}
+    prompt = f"Translate the following user request into a single, executable bash command. Provide only the raw command, without any explanation, comments, or surrounding text. "
+    prompt += "Do not include any backticks or code blocks. If the request is not clear or cannot be translated into a bash command, respond with 'ERROR'\n\n"
+    prompt += "NVER NVER NVER EXAPLAIN ANYTHING! ONLY CODE!!\n"
+    prompt += f"User request: {natural_language_request}\n\n"
+
+    payload = {
+        "inputs": prompt,
+        "parameters": model_params
+    }
+
+    try:
+        response = requests.post(MODEL_BASE_URL + model, headers=headers, json=payload, timeout=15)
+        response.raise_for_status()
+        result = response.json()
+        print(json.dumps(result, indent=2))  # Debugging output
+        command = result[0]['generated_text'].strip().strip('`').strip()
+        return command
+    except requests.exceptions.RequestException as e:
+        print_exc()
+        return "ERROR DURING API CALL"
+    except (KeyError, IndexError) as e:
+        print_exc()
+        return "ERROR IN MODEL RESPONSE"
+    except:
+        print_exc()
+        return "ERROR: UNEXPECTED ERROR OCCURRED"
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: bashai.py <user_request>", file=sys.stderr)
+        sys.exit(1)
+
+    config = load_config()
+
+    api_token = config.get("token")
+    if not api_token:
+        print("ERROR: API token is not set in the configuration file", file=sys.stderr)
+        sys.exit(1)
+    model = config.get("model", "microsoft/BashGPT")
+    model_params = config.get("params", {})    
+
+    user_request = " ".join(sys.argv[1:])
+    bash_command = get_bash_command(api_token, model, model_params, user_request)
+
+    if bash_command.startswith("ERROR"):
+        print("ERROR: MODEL CANNT FIND AN ANSWER FOR THIS REQUEST", file=sys.stderr)
+        sys.exit(1)
+
+    if bash_command.startswith("bash\n"):
+        bash_command = bash_command[5:].strip()
+
+    if bash_command:
+        print(bash_command)
+        ask = input("Do you want to execute this command? (Y/n): ").strip().lower()
+        if ask not in ('y', 'yes', ''):
+            print("CANCELLED")
+            sys.exit(0)
+        # write shebang and command to a temporary file
+        filename = "/tmp/temp_command.sh"
+        with open(filename, "w") as f:
+            f.write("#!/bin/bash\n")
+            f.write(bash_command + "\n")
+        # make the script executable
+        os.chmod(filename, 0o755)
+        # execute the command with sudo
+        exit_code = os.system("sudo /bin/bash " + filename)
+        if exit_code == 0:
+            print("COMMAND EXECUTED SUCCESSFULLY")
+        else:
+            print(f"COMMAND FAILED WITH EXIT CODE {exit_code}", file=sys.stderr)
+            sys.exit(exit_code)
+    else:
+        print("ERROR: CANNOT GENERATE OR EXECUTE THE COMMAND", file=sys.stderr)
+        sys.exit(1)
